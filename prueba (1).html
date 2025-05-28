@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<title>Leaflet + Anime.js Animación Correcta</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link
+  rel="stylesheet"
+  href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+/>
+<style>
+  body, html, #map { margin:0; padding:0; height:100vh; }
+  #map { position: relative; }
+  #infoPanel {
+    position: absolute;
+    bottom: 10px; left: 10px;
+    background: rgba(0,0,0,0.7);
+    color: white;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-family: sans-serif;
+    font-size: 14px;
+    max-width: 300px;
+    pointer-events: none;
+    z-index: 1000;
+  }
+  #toggleBtn {
+    position: absolute;
+    top: 10px; right: 10px;
+    z-index: 1001;
+    padding: 8px 16px;
+    font-size: 16px;
+    background: white;
+    border: none;
+    cursor: pointer;
+    border-radius: 6px;
+    font-weight: bold;
+  }
+  #uploadExcel {
+    position: absolute;
+    top: 10px; left: 10px;
+    z-index: 1001;
+    background: rgba(255,255,255,0.9);
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-family: sans-serif;
+    font-weight: bold;
+  }
+</style>
+</head>
+<body>
+
+<div id="uploadExcel">
+  <label>Sube archivo Excel (.xlsx): <input type="file" id="fileInput" accept=".xlsx" /></label>
+</div>
+<button id="toggleBtn" disabled>⏸ Pausar</button>
+<div id="infoPanel" style="display:none"></div>
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/animejs/3.2.1/anime.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
+
+<script>
+  // Inicializar mapa
+  const map = L.map('map').setView([19.4326, -99.1332], 14);
+
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution:
+      '&copy; OpenStreetMap contributors',
+  }).addTo(map);
+
+  const infoPanel = document.getElementById('infoPanel');
+  const toggleBtn = document.getElementById('toggleBtn');
+  const fileInput = document.getElementById('fileInput');
+
+  let animaciones = [];
+  let puntos = [];
+  let pausado = false;
+
+  toggleBtn.addEventListener('click', () => {
+    pausado = !pausado;
+    animaciones.forEach(anim => pausado ? anim.pause() : anim.play());
+    toggleBtn.textContent = pausado ? '▶ Reanudar' : '⏸ Pausar';
+  });
+
+  fileInput.addEventListener('change', e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    resetSimulation();
+    const reader = new FileReader();
+    reader.onload = e => {
+      const data = new Uint8Array(e.target.result);
+      const workbook = XLSX.read(data, {type: 'array'});
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet);
+      crearRutas(rows);
+      toggleBtn.disabled = false;
+    };
+    reader.readAsArrayBuffer(file);
+  });
+
+  function resetSimulation() {
+    animaciones.forEach(a => a.pause());
+    animaciones = [];
+    puntos.forEach(p => p.marker.remove());
+    puntos = [];
+    infoPanel.style.display = 'none';
+    toggleBtn.textContent = '⏸ Pausar';
+    pausado = false;
+  }
+
+  function crearRutas(data) {
+    const rutas = {};
+
+    // Agrupar por ruta_id
+    data.forEach(row => {
+      if (!rutas[row.ruta_id]) {
+        rutas[row.ruta_id] = {
+          puntos: [],
+          camion: row.camion,
+          peso: row.peso,
+          modelo: row.modelo,
+          tiempos: []
+        };
+      }
+      rutas[row.ruta_id].puntos.push([row.latitud, row.longitud]);
+      rutas[row.ruta_id].tiempos.push(row.tiempo_segundos);
+    });
+
+    Object.entries(rutas).forEach(([id, ruta], i) => {
+      const coords = ruta.puntos.map(p => [p[0], p[1]]);
+      const color = ['cyan', 'magenta', 'yellow', 'lime', 'orange'][i % 5];
+
+      // Dibujar polilínea
+      const polyline = L.polyline(coords, {color, weight: 4}).addTo(map);
+
+      // Crear marcador SVG personalizado (circulo)
+      const svgIcon = L.divIcon({
+        className: '',
+        html: `<svg width="20" height="20" viewBox="0 0 20 20">
+          <circle cx="10" cy="10" r="8" fill="${color}" stroke="white" stroke-width="2"/>
+        </svg>`,
+        iconSize: [20, 20],
+        iconAnchor: [10, 10],
+      });
+
+      const marker = L.marker(coords[0], {icon: svgIcon}).addTo(map);
+
+      puntos.push({marker, rutaId: id, ruta, color, polyline});
+
+      // Mostrar info al hacer click
+      marker.on('click', () => {
+        if (marker.options.icon.options.html.includes('fill="gray"') === false) {
+          infoPanel.style.display = 'block';
+          infoPanel.innerHTML = `
+            <b>Ruta:</b> ${id}<br>
+            <b>Camión:</b> ${ruta.camion}<br>
+            <b>Peso:</b> ${ruta.peso}<br>
+            <b>Modelo:</b> ${ruta.modelo}
+          `;
+        }
+      });
+
+      animarMarcador(marker, ruta.puntos, ruta.tiempos, color);
+    });
+  }
+
+  // Función para interpolar entre dos latLng
+  function interpolateLatLng(p1, p2, t) {
+    return [
+      p1[0] + (p2[0] - p1[0]) * t,
+      p1[1] + (p2[1] - p1[1]) * t,
+    ];
+  }
+
+  // Dado un array de puntos y progreso (0 a 1), calcular latLng interpolado
+  function getPositionOnRoute(points, progress) {
+    if (progress <= 0) return points[0];
+    if (progress >= 1) return points[points.length - 1];
+
+    // Calcular segmento y progreso dentro de segmento
+    const totalSegments = points.length -1;
+    const segmentLength = 1 / totalSegments;
+    const segmentIndex = Math.floor(progress / segmentLength);
+    const segmentProgress = (progress - segmentIndex * segmentLength) / segmentLength;
+
+    return interpolateLatLng(points[segmentIndex], points[segmentIndex + 1], segmentProgress);
+  }
+
+  function animarMarcador(marker, puntosRuta, tiempos, color) {
+    // Duración total ms
+    const duracionTotal = tiempos.reduce((a,b) => a+b, 0) * 1000;
+
+    const anim = anime({
+      targets: {progress: 0},
+      progress: 1,
+      duration: duracionTotal,
+      easing: 'linear',
+      direction: 'alternate',
+      loop: true,
+      update: anim => {
+        const pos = getPositionOnRoute(puntosRuta, anim.animations[0].currentValue);
+        marker.setLatLng(pos);
+
+        // Cambiar color al llegar al final o al inicio
+        if (anim.progress >= 100) {
+          cambiarColorMarcador(marker, 'gray');
+          infoPanel.style.display = 'none';
+        } else if (anim.progress <= 0) {
+          cambiarColorMarcador(marker, color);
+        }
+      }
+    });
+
+    animaciones.push(anim);
+  }
+
+  // Cambiar color del marcador SVG
+  function cambiarColorMarcador(marker, color) {
+    const svg = marker.getElement().querySelector('circle');
+    if(svg) {
+      svg.setAttribute('fill', color);
+      svg.setAttribute('fill-opacity', color === 'gray' ? '0.5' : '1');
+    }
+  }
+
+</script>
+
+</body>
+</html>
