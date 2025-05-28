@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>Simulación rutas con mapa y pausa</title>
+  <style>
+    body, html {
+      margin: 0; padding: 0; height: 100vh; overflow: hidden;
+      font-family: sans-serif;
+      background: #222;
+      color: white;
+    }
+    #mapa {
+      width: 100vw;
+      height: 100vh;
+      background: url('https://upload.wikimedia.org/wikipedia/commons/3/3b/Mexico_City_Mexico_street_map.svg') no-repeat center center;
+      background-size: cover;
+      position: relative;
+    }
+    svg {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100vw;
+      height: 100vh;
+      overflow: visible;
+      pointer-events: none; /* para que svg no bloquee eventos */
+    }
+    .dot {
+      r: 8;
+      stroke: white;
+      stroke-width: 2;
+      cursor: pointer;
+      pointer-events: auto; /* activar para dots */
+      transition: fill 0.3s;
+    }
+    .gris {
+      fill: #999 !important;
+    }
+    #infoPanel {
+      position: absolute;
+      bottom: 20px; left: 20px;
+      background: rgba(0,0,0,0.75);
+      padding: 12px 16px;
+      border-radius: 8px;
+      max-width: 260px;
+      display: none;
+      font-size: 14px;
+      user-select: none;
+    }
+    #toggleBtn {
+      position: absolute;
+      top: 20px; right: 20px;
+      padding: 10px 20px;
+      font-size: 16px;
+      background-color: #222;
+      color: #fff;
+      border: 2px solid #fff;
+      cursor: pointer;
+      user-select: none;
+      z-index: 10;
+    }
+    #uploadExcel {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      background: rgba(0,0,0,0.7);
+      padding: 12px 16px;
+      border-radius: 8px;
+      user-select: none;
+      z-index: 10;
+    }
+  </style>
+</head>
+<body>
+
+<div id="uploadExcel">
+  <label><strong>Sube archivo Excel (.xlsx):</strong></label><br>
+  <input type="file" id="fileInput" accept=".xlsx" />
+</div>
+
+<button id="toggleBtn" disabled>⏸ Pausar</button>
+<div id="infoPanel"></div>
+
+<div id="mapa">
+  <svg id="svgMap" viewBox="0 0 1000 600" xmlns="http://www.w3.org/2000/svg"></svg>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/animejs/3.2.1/anime.min.js"></script>
+<script>
+  const fileInput = document.getElementById('fileInput');
+  const svgMap = document.getElementById('svgMap');
+  const infoPanel = document.getElementById('infoPanel');
+  const toggleBtn = document.getElementById('toggleBtn');
+  let animaciones = [];
+  let pausado = false;
+
+  fileInput.addEventListener('change', e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    resetSimulation();
+    const reader = new FileReader();
+    reader.onload = e => {
+      const data = new Uint8Array(e.target.result);
+      const workbook = XLSX.read(data, {type: 'array'});
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet);
+      crearRutas(rows);
+      toggleBtn.disabled = false;
+    };
+    reader.readAsArrayBuffer(file);
+  });
+
+  toggleBtn.addEventListener('click', () => {
+    pausado = !pausado;
+    animaciones.forEach(anim => pausado ? anim.pause() : anim.play());
+    toggleBtn.textContent = pausado ? '▶ Reanudar' : '⏸ Pausar';
+  });
+
+  function resetSimulation() {
+    animaciones.forEach(a => a.pause());
+    animaciones = [];
+    svgMap.innerHTML = '';
+    infoPanel.style.display = 'none';
+    toggleBtn.textContent = '⏸ Pausar';
+    pausado = false;
+  }
+
+  function crearRutas(data) {
+    const rutas = {};
+
+    // Agrupar datos por ruta
+    data.forEach(row => {
+      if (!rutas[row.ruta_id]) {
+        rutas[row.ruta_id] = { puntos: [], camion: row.camion, peso: row.peso, modelo: row.modelo, tiempos: [] };
+      }
+      rutas[row.ruta_id].puntos.push([parseFloat(row.longitud), parseFloat(row.latitud)]);
+      rutas[row.ruta_id].tiempos.push(row.tiempo_segundos);
+    });
+
+    // Colores para rutas
+    const colores = ['cyan', 'magenta', 'yellow', 'lime', 'orange'];
+
+    Object.entries(rutas).forEach(([id, ruta], i) => {
+      const puntos = ruta.puntos;
+      const color = colores[i % colores.length];
+
+      // Convertir coordenadas geográficas a SVG (aproximado para CDMX)
+      const convert = ([lon, lat]) => [
+        (lon + 99.20) * 10000,
+        (19.44 - lat) * 10000
+      ];
+      const coords = puntos.map(convert);
+
+      // Crear ruta SVG
+      const d = coords.map((p, idx) => (idx === 0 ? 'M' : 'L') + p[0] + ',' + p[1]).join(' ');
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", d);
+      path.setAttribute("stroke", color);
+      path.setAttribute("stroke-width", 3);
+      path.setAttribute("fill", "none");
+      svgMap.appendChild(path);
+
+      // Crear punto móvil
+      const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+      dot.setAttribute("class", "dot");
+      dot.setAttribute("fill", color);
+      dot.setAttribute("r", 8);
+      svgMap.appendChild(dot);
+
+      // Anime.js animación siguiendo la ruta
+      const pathFunc = anime.path(path);
+
+      // Calculamos duración total sumando tiempos entre paradas (o usamos duración fija si faltan)
+      let duracionTotal = 0;
+      if (ruta.tiempos && ruta.tiempos.length > 1) {
+        // sumamos los tiempos entre paradas
+        duracionTotal = ruta.tiempos.reduce((a,b) => a+b, 0) * 1000; // en ms
+      } else {
+        duracionTotal = 10000;
+      }
+
+      const anim = anime({
+        targets: dot,
+        translateX: pathFunc('x'),
+        translateY: pathFunc('y'),
+        rotate: pathFunc('angle'),
+        duration: duracionTotal,
+        easing: 'linear',
+        direction: 'alternate',
+        loop: true,
+        update: anim => {
+          if (anim.progress >= 100) {
+            dot.classList.add('gris');
+            ocultarInfo();
+          } else if (anim.progress <= 0) {
+            dot.classList.remove('gris');
+          }
+        }
+      });
+
+      // Mostrar info al hacer click en el punto (solo si no está gris)
+      dot.addEventListener('click', () => {
+        if (!dot.classList.contains('gris')) {
+          infoPanel.style.display = 'block';
+          infoPanel.innerHTML = `
+            <strong>Ruta:</strong> ${id}<br>
+            <strong>Camión:</strong> ${ruta.camion}<br>
+            <strong>Peso:</strong> ${ruta.peso}<br>
+            <strong>Modelo:</strong> ${ruta.modelo}
+          `;
+        }
+      });
+
+      animaciones.push(anim);
+    });
+  }
+
+  function ocultarInfo() {
+    infoPanel.style.display = 'none';
+  }
+</script>
+
+</body>
+</html>
